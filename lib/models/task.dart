@@ -1,69 +1,47 @@
 import 'package:uuid/uuid.dart';
 
+/// Modelo de Tarefa com suporte a sincronização offline
 class Task {
   final String id;
   final String title;
   final String description;
   final bool completed;
   final String priority;
+  final String userId;
   final DateTime createdAt;
-  final DateTime? dueDate;
-  final String categoryId;
-  final DateTime? reminderTime;
+  final DateTime updatedAt;
+  final int version;
+  
+  // Campos de sincronização
+  final SyncStatus syncStatus;
+  final DateTime? localUpdatedAt;
 
   Task({
     String? id,
     required this.title,
-    this.description = '',
+    required this.description,
     this.completed = false,
     this.priority = 'medium',
+    this.userId = 'user1',
     DateTime? createdAt,
-    this.dueDate,
-    this.categoryId = 'other',
-    this.reminderTime,
-  }) : id = id ?? const Uuid().v4(),
-       createdAt = createdAt ?? DateTime.now();
+    DateTime? updatedAt,
+    this.version = 1,
+    this.syncStatus = SyncStatus.synced,
+    this.localUpdatedAt,
+  })  : id = id ?? const Uuid().v4(),
+        createdAt = createdAt ?? DateTime.now(),
+        updatedAt = updatedAt ?? DateTime.now();
 
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'title': title,
-      'description': description,
-      'completed': completed ? 1 : 0,
-      'priority': priority,
-      'createdAt': createdAt.toIso8601String(),
-      'dueDate': dueDate?.toIso8601String(),
-      'categoryId': categoryId,
-      'reminderTime': reminderTime?.toIso8601String(),
-    };
-  }
-
-  factory Task.fromMap(Map<String, dynamic> map) {
-    return Task(
-      id: map['id'],
-      title: map['title'],
-      description: map['description'] ?? '',
-      completed: map['completed'] == 1,
-      priority: map['priority'] ?? 'medium',
-      createdAt: DateTime.parse(map['createdAt']),
-      dueDate: map['dueDate'] != null ? DateTime.parse(map['dueDate']) : null,
-      categoryId: map['categoryId'] ?? 'other',
-      reminderTime: map['reminderTime'] != null
-          ? DateTime.parse(map['reminderTime'])
-          : null,
-    );
-  }
-
+  /// Criar cópia com modificações
   Task copyWith({
     String? title,
     String? description,
     bool? completed,
     String? priority,
-    DateTime? dueDate,
-    bool clearDueDate = false,
-    String? categoryId,
-    DateTime? reminderTime,
-    bool clearReminderTime = false,
+    DateTime? updatedAt,
+    int? version,
+    SyncStatus? syncStatus,
+    DateTime? localUpdatedAt,
   }) {
     return Task(
       id: id,
@@ -71,17 +49,123 @@ class Task {
       description: description ?? this.description,
       completed: completed ?? this.completed,
       priority: priority ?? this.priority,
+      userId: userId,
       createdAt: createdAt,
-      dueDate: clearDueDate ? null : (dueDate ?? this.dueDate),
-      categoryId: categoryId ?? this.categoryId,
-      reminderTime: clearReminderTime
-          ? null
-          : (reminderTime ?? this.reminderTime),
+      updatedAt: updatedAt ?? this.updatedAt,
+      version: version ?? this.version,
+      syncStatus: syncStatus ?? this.syncStatus,
+      localUpdatedAt: localUpdatedAt ?? this.localUpdatedAt,
     );
   }
 
-  bool get isOverdue {
-    if (dueDate == null || completed) return false;
-    return DateTime.now().isAfter(dueDate!);
+  /// Converter para Map (para banco de dados)
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'description': description,
+      'completed': completed ? 1 : 0,
+      'priority': priority,
+      'userId': userId,
+      'createdAt': createdAt.millisecondsSinceEpoch,
+      'updatedAt': updatedAt.millisecondsSinceEpoch,
+      'version': version,
+      'syncStatus': syncStatus.toString(),
+      'localUpdatedAt': localUpdatedAt?.millisecondsSinceEpoch,
+    };
+  }
+
+  /// Criar Task a partir de Map
+  factory Task.fromMap(Map<String, dynamic> map) {
+    return Task(
+      id: map['id'],
+      title: map['title'],
+      description: map['description'],
+      completed: map['completed'] == 1,
+      priority: map['priority'],
+      userId: map['userId'],
+      createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt']),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updatedAt']),
+      version: map['version'],
+      syncStatus: SyncStatus.values.firstWhere(
+        (e) => e.toString() == map['syncStatus'],
+        orElse: () => SyncStatus.synced,
+      ),
+      localUpdatedAt: map['localUpdatedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(map['localUpdatedAt'])
+          : null,
+    );
+  }
+
+  /// Converter para JSON (para API)
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'description': description,
+      'completed': completed,
+      'priority': priority,
+      'userId': userId,
+      'createdAt': createdAt.millisecondsSinceEpoch,
+      'updatedAt': updatedAt.millisecondsSinceEpoch,
+      'version': version,
+    };
+  }
+
+  /// Criar Task a partir de JSON
+  factory Task.fromJson(Map<String, dynamic> json) {
+    return Task(
+      id: json['id'],
+      title: json['title'],
+      description: json['description'] ?? '',
+      completed: json['completed'] ?? false,
+      priority: json['priority'] ?? 'medium',
+      userId: json['userId'] ?? json['user_id'] ?? 'user1',
+      createdAt: DateTime.fromMillisecondsSinceEpoch(json['createdAt']),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(json['updatedAt']),
+      version: json['version'] ?? 1,
+      syncStatus: SyncStatus.synced,
+    );
+  }
+
+  @override
+  String toString() {
+    return 'Task(id: $id, title: $title, syncStatus: $syncStatus)';
+  }
+}
+
+/// Status de sincronização da tarefa
+enum SyncStatus {
+  synced,    // Sincronizada com servidor
+  pending,   // Pendente de sincronização
+  conflict,  // Conflito detectado
+  error,     // Erro na sincronização
+}
+
+extension SyncStatusExtension on SyncStatus {
+  String get displayName {
+    switch (this) {
+      case SyncStatus.synced:
+        return 'Sincronizada';
+      case SyncStatus.pending:
+        return 'Pendente';
+      case SyncStatus.conflict:
+        return 'Conflito';
+      case SyncStatus.error:
+        return 'Erro';
+    }
+  }
+
+  String get icon {
+    switch (this) {
+      case SyncStatus.synced:
+        return '✓';
+      case SyncStatus.pending:
+        return '⏱';
+      case SyncStatus.conflict:
+        return '⚠';
+      case SyncStatus.error:
+        return '✗';
+    }
   }
 }
