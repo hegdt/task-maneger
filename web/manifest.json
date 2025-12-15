@@ -1,6 +1,6 @@
 {
-    "name": "task_manager_offline",
-    "short_name": "task_manager_offline",
+    "name": "task_manager",
+    "short_name": "task_manager",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

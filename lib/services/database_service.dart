@@ -1,9 +1,8 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/task.dart';
-import '../models/sync_operation.dart';
+import '../utils/database_migration.dart';
 
-/// Serviço de gerenciamento do banco de dados SQLite local
 class DatabaseService {
   static final DatabaseService instance = DatabaseService._init();
   static Database? _database;
@@ -12,7 +11,7 @@ class DatabaseService {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDB('task_manager_offline.db');
+    _database = await _initDB('tasks.db');
     return _database!;
   }
 
@@ -22,273 +21,190 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 7,
       onCreate: _createDB,
+      onUpgrade: _upgradeDB,
     );
   }
 
   Future<void> _createDB(Database db, int version) async {
-    // Tabela de tarefas
     await db.execute('''
       CREATE TABLE tasks (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         description TEXT,
-        completed INTEGER NOT NULL DEFAULT 0,
+        completed INTEGER NOT NULL,
         priority TEXT NOT NULL,
-        userId TEXT NOT NULL,
-        createdAt INTEGER NOT NULL,
-        updatedAt INTEGER NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1,
-        syncStatus TEXT NOT NULL,
-        localUpdatedAt INTEGER
+        createdAt TEXT NOT NULL,
+        dueDate TEXT,
+        categoryId TEXT NOT NULL DEFAULT 'other',
+        reminderTime TEXT,
+        photoPath TEXT,
+        photoPaths TEXT,
+        completedAt TEXT,
+        completedBy TEXT,
+        latitude REAL,
+        longitude REAL,
+        locationName TEXT,
+        cloudPhotoUrls TEXT,
+        cloudPhotoKeys TEXT,
+        syncedToCloud INTEGER DEFAULT 0
       )
     ''');
-
-    // Tabela de fila de sincronização
-    await db.execute('''
-      CREATE TABLE sync_queue (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        taskId TEXT NOT NULL,
-        data TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        retries INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL,
-        error TEXT
-      )
-    ''');
-
-    // Tabela de metadados
-    await db.execute('''
-      CREATE TABLE metadata (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    ''');
-
-    // Índices para otimização
-    await db.execute('CREATE INDEX idx_tasks_userId ON tasks(userId)');
-    await db.execute('CREATE INDEX idx_tasks_syncStatus ON tasks(syncStatus)');
-    await db.execute('CREATE INDEX idx_sync_queue_status ON sync_queue(status)');
-
-    print('✅ Banco de dados criado com sucesso');
   }
 
-  // ==================== OPERAÇÕES DE TAREFAS ====================
+  Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
+    // Migração para versão 2 - adiciona dueDate
+    if (oldVersion < 2) {
+      await DatabaseMigration.addDueDateColumn(db);
+    }
 
-  /// Inserir ou atualizar tarefa
-  Future<Task> upsertTask(Task task) async {
+    // Migração para versão 3 - adiciona categoryId
+    if (oldVersion < 3) {
+      await DatabaseMigration.addCategoryIdColumn(db);
+    }
+
+    // Migração para versão 4 - adiciona reminderTime
+    if (oldVersion < 4) {
+      await DatabaseMigration.addReminderTimeColumn(db);
+    }
+    if (oldVersion < 5) {
+      await db.execute('ALTER TABLE tasks ADD COLUMN photoPath TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN completedAt TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN completedBy TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN latitude REAL');
+      await db.execute('ALTER TABLE tasks ADD COLUMN longitude REAL');
+      await db.execute('ALTER TABLE tasks ADD COLUMN locationName TEXT');
+    }
+    // Migração para versão 6 - adiciona photoPaths para múltiplas fotos
+    if (oldVersion < 6) {
+      await db.execute('ALTER TABLE tasks ADD COLUMN photoPaths TEXT');
+      // Migra dados existentes de photoPath para photoPaths
+      final tasks = await db.query('tasks');
+      for (final task in tasks) {
+        if (task['photoPath'] != null && task['photoPath'] != '') {
+          final photoPath = task['photoPath'] as String;
+          final photoPaths = '["$photoPath"]';
+          await db.update(
+            'tasks',
+            {'photoPaths': photoPaths},
+            where: 'id = ?',
+            whereArgs: [task['id']],
+          );
+        }
+      }
+    }
+
+    // Migração para versão 7 - adiciona suporte a Cloud (LocalStack S3/DynamoDB)
+    if (oldVersion < 7) {
+      await db.execute('ALTER TABLE tasks ADD COLUMN cloudPhotoUrls TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN cloudPhotoKeys TEXT');
+      await db.execute(
+        'ALTER TABLE tasks ADD COLUMN syncedToCloud INTEGER DEFAULT 0',
+      );
+    }
+  }
+
+  Future<Task> create(Task task) async {
     final db = await database;
-    await db.insert(
-      'tasks',
-      task.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await db.insert('tasks', task.toMap());
     return task;
   }
 
-  /// Buscar tarefa por ID
-  Future<Task?> getTask(String id) async {
+  Future<Task?> read(String id) async {
     final db = await database;
-    final maps = await db.query(
+    final maps = await db.query('tasks', where: 'id = ?', whereArgs: [id]);
+
+    if (maps.isNotEmpty) {
+      return Task.fromMap(maps.first);
+    }
+    return null;
+  }
+
+  Future<List<Task>> readAll({String? categoryId}) async {
+    final db = await database;
+    // Ordena por data de vencimento (nulls no final), depois por data de criação
+    const orderBy = '''
+      CASE 
+        WHEN dueDate IS NULL THEN 1 
+        ELSE 0 
+      END,
+      dueDate ASC,
+      createdAt DESC
+    ''';
+
+    if (categoryId != null) {
+      final result = await db.query(
+        'tasks',
+        where: 'categoryId = ?',
+        whereArgs: [categoryId],
+        orderBy: orderBy,
+      );
+      return result.map((map) => Task.fromMap(map)).toList();
+    }
+
+    final result = await db.query('tasks', orderBy: orderBy);
+    return result.map((map) => Task.fromMap(map)).toList();
+  }
+
+  Future<int> update(Task task) async {
+    final db = await database;
+    return db.update(
       'tasks',
+      task.toMap(),
       where: 'id = ?',
-      whereArgs: [id],
-    );
-
-    if (maps.isEmpty) return null;
-    return Task.fromMap(maps.first);
-  }
-
-  /// Buscar todas as tarefas
-  Future<List<Task>> getAllTasks({String userId = 'user1'}) async {
-    final db = await database;
-    final maps = await db.query(
-      'tasks',
-      where: 'userId = ?',
-      whereArgs: [userId],
-      orderBy: 'updatedAt DESC',
-    );
-
-    return maps.map((map) => Task.fromMap(map)).toList();
-  }
-
-  /// Buscar tarefas não sincronizadas
-  Future<List<Task>> getUnsyncedTasks() async {
-    final db = await database;
-    final maps = await db.query(
-      'tasks',
-      where: 'syncStatus = ?',
-      whereArgs: [SyncStatus.pending.toString()],
-    );
-
-    return maps.map((map) => Task.fromMap(map)).toList();
-  }
-
-  /// Buscar tarefas com conflito
-  Future<List<Task>> getConflictedTasks() async {
-    final db = await database;
-    final maps = await db.query(
-      'tasks',
-      where: 'syncStatus = ?',
-      whereArgs: [SyncStatus.conflict.toString()],
-    );
-
-    return maps.map((map) => Task.fromMap(map)).toList();
-  }
-
-  /// Deletar tarefa
-  Future<int> deleteTask(String id) async {
-    final db = await database;
-    return await db.delete(
-      'tasks',
-      where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [task.id],
     );
   }
 
-  /// Atualizar status de sincronização
-  Future<void> updateSyncStatus(String id, SyncStatus status) async {
+  Future<int> delete(String id) async {
     final db = await database;
-    await db.update(
-      'tasks',
-      {'syncStatus': status.toString()},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    return await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
   }
 
-  // ==================== FILA DE SINCRONIZAÇÃO ====================
+  // Método especial: buscar tarefas por proximidade
+  Future<List<Task>> getTasksNearLocation({
+    required double latitude,
+    required double longitude,
+    double radiusInMeters = 1000,
+  }) async {
+    final allTasks = await readAll();
 
-  /// Adicionar operação à fila
-  Future<SyncOperation> addToSyncQueue(SyncOperation operation) async {
-    final db = await database;
-    await db.insert(
-      'sync_queue',
-      operation.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-    return operation;
+    return allTasks.where((task) {
+      if (!task.hasLocation) return false;
+
+      // Cálculo de distância usando fórmula de Haversine (simplificada)
+      final latDiff = (task.latitude! - latitude).abs();
+      final lonDiff = (task.longitude! - longitude).abs();
+      final distance = ((latDiff * 111000) + (lonDiff * 111000)) / 2;
+
+      return distance <= radiusInMeters;
+    }).toList();
   }
 
-  /// Obter operações pendentes
-  Future<List<SyncOperation>> getPendingSyncOperations() async {
-    final db = await database;
-    final maps = await db.query(
-      'sync_queue',
-      where: 'status = ?',
-      whereArgs: [SyncOperationStatus.pending.toString()],
-      orderBy: 'timestamp ASC',
-    );
-
-    return maps.map((map) => SyncOperation.fromMap(map)).toList();
-  }
-
-  /// Atualizar operação de sincronização
-  Future<void> updateSyncOperation(SyncOperation operation) async {
-    final db = await database;
-    await db.update(
-      'sync_queue',
-      operation.toMap(),
-      where: 'id = ?',
-      whereArgs: [operation.id],
-    );
-  }
-
-  /// Remover operação da fila
-  Future<int> removeSyncOperation(String id) async {
-    final db = await database;
-    return await db.delete(
-      'sync_queue',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
-  /// Limpar operações concluídas
-  Future<int> clearCompletedOperations() async {
-    final db = await database;
-    return await db.delete(
-      'sync_queue',
-      where: 'status = ?',
-      whereArgs: [SyncOperationStatus.completed.toString()],
-    );
-  }
-
-  // ==================== METADADOS ====================
-
-  /// Salvar metadado
-  Future<void> setMetadata(String key, String value) async {
-    final db = await database;
-    await db.insert(
-      'metadata',
-      {'key': key, 'value': value},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
-
-  /// Obter metadado
-  Future<String?> getMetadata(String key) async {
-    final db = await database;
-    final maps = await db.query(
-      'metadata',
-      where: 'key = ?',
-      whereArgs: [key],
-    );
-
-    if (maps.isEmpty) return null;
-    return maps.first['value'] as String;
-  }
-
-  // ==================== ESTATÍSTICAS ====================
-
-  /// Obter estatísticas do banco de dados
-  Future<Map<String, dynamic>> getStats() async {
-    final db = await database;
-    
-    final totalTasks = Sqflite.firstIntValue(
-      await db.rawQuery('SELECT COUNT(*) FROM tasks')
-    ) ?? 0;
-    
-    final unsyncedTasks = Sqflite.firstIntValue(
-      await db.rawQuery(
-        'SELECT COUNT(*) FROM tasks WHERE syncStatus = ?',
-        [SyncStatus.pending.toString()]
-      )
-    ) ?? 0;
-    
-    final queuedOperations = Sqflite.firstIntValue(
-      await db.rawQuery(
-        'SELECT COUNT(*) FROM sync_queue WHERE status = ?',
-        [SyncOperationStatus.pending.toString()]
-      )
-    ) ?? 0;
-    
-    final lastSync = await getMetadata('lastSyncTimestamp');
-
-    return {
-      'totalTasks': totalTasks,
-      'unsyncedTasks': unsyncedTasks,
-      'queuedOperations': queuedOperations,
-      'lastSync': lastSync != null ? int.parse(lastSync) : null,
-    };
-  }
-
-  // ==================== UTILIDADES ====================
-
-  /// Limpar todos os dados
-  Future<void> clearAllData() async {
+  /// Limpa todas as tarefas do banco de dados
+  /// Use com cuidado - deleta todos os dados!
+  Future<void> deleteAllTasks() async {
     final db = await database;
     await db.delete('tasks');
-    await db.delete('sync_queue');
-    await db.delete('metadata');
-    print('🗑️ Todos os dados foram limpos');
   }
 
-  /// Fechar banco de dados
-  Future<void> close() async {
-    final db = await database;
-    await db.close();
+  /// Reseta completamente o banco de dados
+  /// Use apenas em caso de problemas de migração
+  Future<void> resetDatabase() async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, 'tasks.db');
+
+    // Fecha o banco de dados atual
+    if (_database != null) {
+      await _database!.close();
+      _database = null;
+    }
+
+    // Delete o arquivo do banco de dados
+    await deleteDatabase(path);
+
+    // Recria o banco de dados
+    await database;
   }
 }
