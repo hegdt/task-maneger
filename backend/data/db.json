@@ -1,4 +1,27 @@
 {
-  "tasks": [],
-  "lastTaskUpdate": 1764539243889
+  "tasks": [
+    {
+      "id": "480d621a-9a47-4a8a-a05e-3e8dd3729f31",
+      "title": "tarefa",
+      "description": "a",
+      "completed": false,
+      "priority": "urgent",
+      "userId": "user1",
+      "createdAt": 1765814165006,
+      "updatedAt": 1765814407882,
+      "version": 2
+    },
+    {
+      "id": "8217e91d-0746-49a0-ab55-324281cf2014",
+      "title": "outra",
+      "description": "a",
+      "completed": false,
+      "priority": "low",
+      "userId": "user1",
+      "createdAt": 1765814376125,
+      "updatedAt": 1765814408002,
+      "version": 1
+    }
+  ],
+  "lastTaskUpdate": 1765814408002
 }

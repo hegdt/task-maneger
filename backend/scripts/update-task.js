@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 
-// npm run update-task -- --id ID_DA_TAREFA --title "Novo título" --description "..." --priority high --completed true
+// npm run update-task -- --title "Novo título" --description "..." --priority high --completed true
 
 const DEFAULT_API = process.env.API_URL || "http://localhost:3000/api";
 
